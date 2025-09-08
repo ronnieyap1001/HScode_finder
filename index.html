@@ -10,12 +10,41 @@
     .mono { font-feature-settings: 'tnum' on, 'lnum' on; font-variant-numeric: tabular-nums lining-nums; }
     .bullets { white-space: pre-line; }
   </style>
+  <!--
+    Cloudflare setup (proxy that hides your OpenAI key):
+    1) Create a Worker and paste this code:
+
+    export default {
+      async fetch(req, env) {
+        if (req.method !== 'POST') return new Response('Only POST', { status: 405 });
+        const body = await req.json();
+        // Expect { model, temperature, messages }
+        const r = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${env.OPENAI_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(body)
+        });
+        return new Response(r.body, { headers: { 'Content-Type': 'application/json' } });
+      }
+    }
+
+    2) In the Worker -> Settings -> Variables, add OPENAI_API_KEY with your key.
+    3) Deploy. Copy the Worker URL (e.g. https://your-worker.workers.dev)
+    4) Set CF_WORKER_URL below to that URL.
+  -->
 </head>
 <body class="bg-gray-50 text-gray-900">
   <div class="max-w-6xl mx-auto p-6 space-y-6">
     <header>
       <h1 class="text-2xl md:text-3xl font-bold">HS Code Finder</h1>
-      <p class="text-sm text-gray-600 mt-1">Describe the item and optional usage, click <em>Submit</em> to generate HS code(s) with AI. If the input is not detailed enough, the AI may return up to 3 possible HS codes. This tool always uses <b>GPT-4.1-nano</b>.</p>
+      <p class="text-sm text-gray-600 mt-1">
+        Describe the item and optional usage, click <em>Submit</em> to generate HS code(s) with AI.
+        If the input is not detailed enough, the AI may return up to 3 possible HS codes.
+        This tool always uses <b>GPT-4.1-nano</b> via your Cloudflare Worker.
+      </p>
     </header>
 
     <section class="bg-white shadow rounded-2xl overflow-hidden">
@@ -46,11 +75,14 @@
   <script>
     const tbody = document.getElementById('tbody');
     const DEFAULT_ROWS = 5;
-    const OPENAI_API_KEY = "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";
+
+    // --------------- Configure this to your Worker URL ---------------
+    const CF_WORKER_URL = 'https://YOUR-WORKER.workers.dev'; // <- replace me
+    // -----------------------------------------------------------------
 
     function escapeHtml(s) {
       const str = (s === undefined || s === null) ? '' : String(s);
-      return str.replace(/[&<>"]'/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+      return str.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
     }
 
     function makeRow(item = '', usage = '', code = '', codedesc = '') {
@@ -87,23 +119,19 @@
       s.className = 'self-center text-sm ' + (isError ? 'text-red-600' : 'text-gray-600');
     }
 
+    // aiSuggest: calls your Cloudflare Worker, which in turn calls OpenAI
     async function aiSuggest(rows) {
-      const model = "gpt-4.1-nano";
+      const model = 'gpt-4.1-nano';
       const system = "You are an HS code assistant. For each item, output the most likely 6–10 digit HS code(s). If the input is ambiguous, you may return up to 3 possible HS codes with their descriptions. Return JSON strictly as an array of objects with keys index, codes (array of strings), codedescs (array of strings).";
-      const user = rows.map((r, i) => ({ index: i, item: r.item, usage: r.usage }));
-
+      const messages = [
+        { role: 'system', content: system },
+        { role: 'user', content: `Rows: ${JSON.stringify(rows.map((r,i)=>({index:i,item:r.item,usage:r.usage})))}. Respond with JSON only.` }
+      ];
       try {
-        const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        const res = await fetch(CF_WORKER_URL, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_API_KEY}` },
-          body: JSON.stringify({
-            model,
-            temperature: 0.2,
-            messages: [
-              { role: 'system', content: system },
-              { role: 'user', content: `Rows: ${JSON.stringify(user)}. Respond with JSON only.` }
-            ]
-          })
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model, temperature: 0.2, messages })
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
@@ -123,6 +151,7 @@
       const rows = getRows();
       if (rows.length === 0) { setStatus('Nothing to process'); return; }
 
+      setStatus('Asking AI…');
       const ai = await aiSuggest(rows);
       if (ai) {
         ai.forEach(r => {
@@ -150,26 +179,30 @@
 
     document.getElementById('exportBtn').addEventListener('click', () => {
       const rows = [...document.querySelectorAll('#hsTable tbody tr')].map(tr => {
-        const [item, usage, code, codedesc] = [...tr.children].map(td => td.textContent.trim());
-        return { 'Describe the Item': item, 'Usage': usage, 'HS Code(s)': code, 'HS Code description(s)': codedesc };
+        const [item, usage, code, codedesc] = [...tr.children].map(td => td.textContent || '');
+        return { 'Describe the Item': item.trim(), 'Usage': usage.trim(), 'HS Code(s)': code.trim(), 'HS Code description(s)': codedesc.trim() };
       }).filter(r => r['Describe the Item'] || r['Usage'] || r['HS Code(s)'] || r['HS Code description(s)']);
       if (rows.length === 0) { setStatus('Nothing to export'); return; }
 
-      // Export as CSV
-      const header = Object.keys(rows[0]).join(",");
-      const csv = [header, ...rows.map(r => Object.values(r).map(v => '"'+v.replace(/"/g,'""')+'"').join(","))].join("\n");
+      const headers = Object.keys(rows[0]);
+      const esc = v => '"' + String(v).replace(/"/g,'""').replace(/\r?\n/g,'\n') + '"';
+      const lines = [headers.map(esc).join(',')];
+      for (const r of rows) lines.push(headers.map(h => esc(r[h])).join(','));
+      const csv = '\uFEFF' + lines.join('\r\n'); // BOM + CRLF for Excel
+
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = 'hs_codes.csv';
-      link.click();
-      setStatus('Exported as CSV.');
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'hs_codes.csv';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setStatus('Exported CSV.');
     });
 
     // Copy table to clipboard as TSV (Excel-friendly)
     document.getElementById('copyBtn').addEventListener('click', async () => {
       const rows = [...document.querySelectorAll('#hsTable tbody tr')]
-        .map(tr => [...tr.children].map(td => td.textContent || ''))
+        .map(tr => [...tr.children].map(td => (td.textContent || '')))
         .filter(r => r.some(c => c.trim()));
       if (rows.length === 0) { setStatus('Nothing to copy'); return; }
 
