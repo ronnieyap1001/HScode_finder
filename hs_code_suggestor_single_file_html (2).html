@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HS Code Finder</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    td[contenteditable="true"]:focus { outline: 2px solid rgba(59,130,246,0.5); }
+    .mono { font-feature-settings: 'tnum' on, 'lnum' on; font-variant-numeric: tabular-nums lining-nums; }
+    .bullets { white-space: pre-line; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <div class="max-w-6xl mx-auto p-6 space-y-6">
+    <header>
+      <h1 class="text-2xl md:text-3xl font-bold">HS Code Finder</h1>
+      <p class="text-sm text-gray-600 mt-1">Describe the item and optional usage, click <em>Submit</em> to generate HS code(s) with AI. If the input is not detailed enough, the AI may return up to 3 possible HS codes. This tool always uses <b>GPT-4.1-nano</b>.</p>
+    </header>
+
+    <section class="bg-white shadow rounded-2xl overflow-hidden">
+      <div class="overflow-x-auto">
+        <table id="hsTable" class="min-w-full table-fixed">
+          <thead class="bg-gray-100">
+            <tr>
+              <th class="w-[25%] px-3 py-2 text-left text-sm font-semibold text-gray-700">Describe the Item</th>
+              <th class="w-[35%] px-3 py-2 text-left text-sm font-semibold text-gray-700">Usage (Optional)</th>
+              <th class="w-[15%] px-3 py-2 text-left text-sm font-semibold text-gray-700">HS Code(s)</th>
+              <th class="w-[25%] px-3 py-2 text-left text-sm font-semibold text-gray-700">HS Code description(s)</th>
+            </tr>
+          </thead>
+          <tbody id="tbody" class="divide-y divide-gray-100"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="flex flex-wrap gap-3">
+      <button id="submitBtn" class="px-5 py-2.5 rounded-2xl bg-blue-600 text-white font-semibold shadow hover:bg-blue-700">Submit</button>
+      <button id="clearBtn" class="px-5 py-2.5 rounded-2xl bg-gray-200 text-gray-800 font-semibold shadow hover:bg-gray-300">Reset</button>
+      <button id="exportBtn" class="px-5 py-2.5 rounded-2xl bg-emerald-600 text-white font-semibold shadow hover:bg-emerald-700">Export as CSV</button>
+      <button id="copyBtn" class="px-5 py-2.5 rounded-2xl bg-indigo-600 text-white font-semibold shadow hover:bg-indigo-700">Copy Table</button>
+      <span id="status" class="self-center text-sm text-gray-600"></span>
+    </section>
+  </div>
+
+  <script>
+    const tbody = document.getElementById('tbody');
+    const DEFAULT_ROWS = 5;
+    const OPENAI_API_KEY = "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";
+
+    function escapeHtml(s) {
+      const str = (s === undefined || s === null) ? '' : String(s);
+      return str.replace(/[&<>"]'/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    }
+
+    function makeRow(item = '', usage = '', code = '', codedesc = '') {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td contenteditable="true" class="px-3 py-2 text-sm">${escapeHtml(item)}</td>
+        <td contenteditable="true" class="px-3 py-2 text-sm">${escapeHtml(usage)}</td>
+        <td class="px-3 py-2 text-sm mono text-blue-700 bullets">${escapeHtml(code)}</td>
+        <td class="px-3 py-2 text-sm bullets">${escapeHtml(codedesc)}</td>
+      `;
+      return tr;
+    }
+
+    function initRows(n = DEFAULT_ROWS) {
+      tbody.innerHTML = '';
+      for (let i = 0; i < n; i++) tbody.appendChild(makeRow());
+    }
+
+    function getRows() {
+      return [...tbody.querySelectorAll('tr')].map(tr => {
+        const tds = tr.children;
+        return {
+          item: tds[0].textContent.trim(),
+          usage: tds[1].textContent.trim(),
+          codeCell: tds[2],
+          codedescCell: tds[3]
+        };
+      }).filter(r => r.item || r.usage);
+    }
+
+    function setStatus(msg, isError=false) {
+      const s = document.getElementById('status');
+      s.textContent = msg;
+      s.className = 'self-center text-sm ' + (isError ? 'text-red-600' : 'text-gray-600');
+    }
+
+    async function aiSuggest(rows) {
+      const model = "gpt-4.1-nano";
+      const system = "You are an HS code assistant. For each item, output the most likely 6–10 digit HS code(s). If the input is ambiguous, you may return up to 3 possible HS codes with their descriptions. Return JSON strictly as an array of objects with keys index, codes (array of strings), codedescs (array of strings).";
+      const user = rows.map((r, i) => ({ index: i, item: r.item, usage: r.usage }));
+
+      try {
+        const res = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_API_KEY}` },
+          body: JSON.stringify({
+            model,
+            temperature: 0.2,
+            messages: [
+              { role: 'system', content: system },
+              { role: 'user', content: `Rows: ${JSON.stringify(user)}. Respond with JSON only.` }
+            ]
+          })
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const text = data.choices?.[0]?.message?.content || '';
+        const json = JSON.parse(text.match(/\[.*\]/s)?.[0] || '[]');
+        return json;
+      } catch (err) {
+        console.error(err);
+        setStatus('AI error: ' + err.message, true);
+        return null;
+      }
+    }
+
+    initRows();
+
+    document.getElementById('submitBtn').addEventListener('click', async () => {
+      const rows = getRows();
+      if (rows.length === 0) { setStatus('Nothing to process'); return; }
+
+      const ai = await aiSuggest(rows);
+      if (ai) {
+        ai.forEach(r => {
+          const row = rows[r.index];
+          if (row) {
+            if (Array.isArray(r.codes) && Array.isArray(r.codedescs)) {
+              row.codeCell.textContent = r.codes.map((c,i)=> `${i+1}. ${c}`).join("\n");
+              row.codedescCell.textContent = r.codedescs.map((d,i)=> `${i+1}. ${d}`).join("\n");
+            } else {
+              row.codeCell.textContent = r.code || '';
+              row.codedescCell.textContent = r.codedesc || '';
+            }
+          }
+        });
+        setStatus('Done.');
+      }
+    });
+
+    document.getElementById('clearBtn').addEventListener('click', () => {
+      initRows();
+      setStatus('Reset. Ready for new submission.');
+      const first = tbody.querySelector('tr td[contenteditable="true"]');
+      if (first) first.focus();
+    });
+
+    document.getElementById('exportBtn').addEventListener('click', () => {
+      const rows = [...document.querySelectorAll('#hsTable tbody tr')].map(tr => {
+        const [item, usage, code, codedesc] = [...tr.children].map(td => td.textContent.trim());
+        return { 'Describe the Item': item, 'Usage': usage, 'HS Code(s)': code, 'HS Code description(s)': codedesc };
+      }).filter(r => r['Describe the Item'] || r['Usage'] || r['HS Code(s)'] || r['HS Code description(s)']);
+      if (rows.length === 0) { setStatus('Nothing to export'); return; }
+
+      // Export as CSV
+      const header = Object.keys(rows[0]).join(",");
+      const csv = [header, ...rows.map(r => Object.values(r).map(v => '"'+v.replace(/"/g,'""')+'"').join(","))].join("\n");
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = 'hs_codes.csv';
+      link.click();
+      setStatus('Exported as CSV.');
+    });
+
+    // Copy table to clipboard as TSV (Excel-friendly)
+    document.getElementById('copyBtn').addEventListener('click', async () => {
+      const rows = [...document.querySelectorAll('#hsTable tbody tr')]
+        .map(tr => [...tr.children].map(td => td.textContent || ''))
+        .filter(r => r.some(c => c.trim()));
+      if (rows.length === 0) { setStatus('Nothing to copy'); return; }
+
+      const headers = ['Describe the Item','Usage','HS Code(s)','HS Code description(s)'];
+      const normalize = s => String(s ?? '').replace(/\r?\n/g, ' • ');
+      const tsv = [headers.join('\t'), ...rows.map(r => r.map(normalize).join('\t'))].join('\r\n');
+      try {
+        await navigator.clipboard.writeText(tsv);
+        setStatus('Copied table to clipboard. Paste into Excel.');
+      } catch (e) {
+        console.error(e);
+        setStatus('Clipboard copy failed. Select table and press Ctrl/Cmd+C.', true);
+      }
+    });
+  </script>
+</body>
+</html>
