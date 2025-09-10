@@ -8,7 +8,7 @@
   <style>
     td[contenteditable="true"]:focus { outline: 2px solid rgba(59,130,246,0.5); }
     .mono { font-feature-settings: 'tnum' on, 'lnum' on; font-variant-numeric: tabular-nums lining-nums; }
-    .bullets { white-space: pre-line; }
+    .bullets { white-space: pre-line; } /* keep numbered bullets on new lines */
   </style>
 </head>
 <body class="bg-gray-50 text-gray-900">
@@ -17,7 +17,7 @@
       <h1 class="text-2xl md:text-3xl font-bold">HS Code Finder</h1>
       <p class="text-sm text-gray-600">
         Describe the item and optional usage, then click <em>Submit</em> to generate HS code(s) with AI.<br>
-        If the input isn’t detailed enough, the AI may return up to <b>3</b> possible HS codes.<br>
+        If the input isn’t detailed enough, the AI may return up to <b>3</b> possible HS codes.
       </p>
     </header>
 
@@ -48,33 +48,36 @@
   </div>
 
   <script>
-    // ---------------- Config ----------------
-    const OPENAI_API_KEY = "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"; // WARNING: exposed in client
-    const OPENAI_ENDPOINT = 'https://api.openai.com/v1/chat/completions';
-    const MODEL = 'gpt-4.1-nano';
+    // ---------- Config: Cloudflare Worker endpoint ----------
+    const CF_WORKER_URL = 'https://hscodefinder.ronnieyap1001-e34.workers.dev/'; // workers.dev route
 
-    // ---------------- DOM helpers ----------------
+    // ---------- DOM ----------
     const tbody = document.getElementById('tbody');
-    const statusEl = document.getElementById('status');
+    const submitBtn = document.getElementById('submitBtn');
+    const clearBtn  = document.getElementById('clearBtn');
+    const sampleBtn = document.getElementById('sampleBtn');
+    const exportBtn = document.getElementById('exportBtn');
+    const copyBtn   = document.getElementById('copyBtn');
     const DEFAULT_ROWS = 5;
 
     function escapeHtml(s) {
       const str = (s == null) ? '' : String(s);
-      return str.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+      return str.replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     }
-    function setStatus(msg, isError=false){
-      statusEl.textContent = msg || '';
-      statusEl.className = 'self-center text-sm ' + (isError ? 'text-red-600' : 'text-gray-600');
+    function setStatus(msg, isError=false) {
+      const s = document.getElementById('status');
+      s.textContent = msg || '';
+      s.className = 'self-center text-sm ' + (isError ? 'text-red-600' : 'text-gray-600');
     }
 
+    // ---------- Table builders ----------
     function makeRow(item = '', usage = '', code = '', codedesc = '') {
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td contenteditable="true" class="px-3 py-2 text-sm border">${escapeHtml(item)}</td>
         <td contenteditable="true" class="px-3 py-2 text-sm border">${escapeHtml(usage)}</td>
         <td class="px-3 py-2 text-sm mono text-blue-700 bullets border">${escapeHtml(code)}</td>
-        <td class="px-3 py-2 text-sm bullets border">${escapeHtml(codedesc)}</td>
-      `;
+        <td class="px-3 py-2 text-sm bullets border">${escapeHtml(codedesc)}</td>`;
       return tr;
     }
     function initRows(n = DEFAULT_ROWS) {
@@ -83,13 +86,8 @@
     }
     function getRows() {
       return [...tbody.querySelectorAll('tr')].map(tr => {
-        const tds = tr.children;
-        return {
-          item: tds[0].textContent.trim(),
-          usage: tds[1].textContent.trim(),
-          codeCell: tds[2],
-          codedescCell: tds[3]
-        };
+        const t = tr.children;
+        return { item: t[0].textContent.trim(), usage: t[1].textContent.trim(), codeCell: t[2], codedescCell: t[3] };
       }).filter(r => r.item || r.usage);
     }
 
@@ -117,37 +115,39 @@
       });
     });
 
-    // ---------------- AI call (direct to OpenAI) ----------------
+    // ---------- AI call via Cloudflare Worker ----------
     async function aiSuggest(rows) {
+      const model = 'gpt-4.1-nano';
       const system = "You are an HS code assistant. For each item, output the most likely 6–10 digit HS code(s). If the input is ambiguous, you may return up to 3 possible HS codes with their descriptions. Return JSON strictly as an array of objects with keys index, codes (array of strings), codedescs (array of strings). Limit to 3 suggestions max.";
       const messages = [
         { role: 'system', content: system },
         { role: 'user', content: `Rows: ${JSON.stringify(rows.map((r,i)=>({index:i,item:r.item,usage:r.usage})))}. Respond with JSON only.` }
       ];
 
-      const res = await fetch(OPENAI_ENDPOINT, {
+      const res = await fetch(CF_WORKER_URL, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${OPENAI_API_KEY}`
-        },
-        body: JSON.stringify({ model: MODEL, temperature: 0.2, messages })
+        mode: 'cors',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, temperature: 0.2, messages })
       });
 
       const raw = await res.text();
       let data = null;
       try { data = raw ? JSON.parse(raw) : null; } catch { data = null; }
+
       if (!res.ok) {
         const hint = data?.error?.message || data?.error || raw || `HTTP ${res.status}`;
         throw new Error(hint);
       }
+
       const text = data?.choices?.[0]?.message?.content || '';
       const json = JSON.parse((text.match(/\[[\s\S]*\]/) || ['[]'])[0]);
       return Array.isArray(json) ? json : [];
     }
 
-    // ---------------- Event handlers ----------------
-    document.getElementById('submitBtn').addEventListener('click', async () => {
+    // ---------- Handlers ----------
+    submitBtn.addEventListener('click', async () => {
       const rows = getRows();
       if (rows.length === 0) { setStatus('Nothing to process'); return; }
       setStatus('Asking AI…');
@@ -161,7 +161,7 @@
           row.codeCell.textContent = codes.map((c,i)=> `${i+1}. ${c}`).join('\n');
           row.codedescCell.textContent = descs.map((d,i)=> `${i+1}. ${d}`).join('\n');
         });
-        // ensure one empty row for next entry
+        // ensure one empty row ready
         if (![...tbody.children].some(tr => !tr.children[0].textContent && !tr.children[1].textContent)) {
           tbody.appendChild(makeRow());
         }
@@ -172,14 +172,14 @@
       }
     });
 
-    document.getElementById('clearBtn').addEventListener('click', () => {
+    clearBtn.addEventListener('click', () => {
       initRows();
       setStatus('Reset. Ready for new submission.');
       const first = tbody.querySelector('tr td[contenteditable="true"]');
       if (first) first.focus();
     });
 
-    document.getElementById('sampleBtn').addEventListener('click', () => {
+    sampleBtn.addEventListener('click', () => {
       const samples = [
         ['Steel bracket', 'Fabricated support for equipment mounting'],
         ['Polycarbonate sheet', '3mm clear glazing'],
@@ -192,7 +192,8 @@
       setStatus('Loaded sample rows. Click Submit to test.');
     });
 
-    document.getElementById('exportBtn').addEventListener('click', () => {
+    // Export CSV (Excel-friendly)
+    exportBtn.addEventListener('click', () => {
       const rows = [...document.querySelectorAll('#hsTable tbody tr')].map(tr => {
         const [item, usage, code, codedesc] = [...tr.children].map(td => td.textContent || '');
         return { 'Describe the Item': item.trim(), 'Usage': usage.trim(), 'HS Code(s)': code.trim(), 'HS Code description(s)': codedesc.trim() };
@@ -203,7 +204,7 @@
       const esc = v => '"' + String(v).replace(/"/g,'""').replace(/\r?\n/g,'\n') + '"';
       const lines = [headers.map(esc).join(',')];
       for (const r of rows) lines.push(headers.map(h => esc(r[h])).join(','));
-      const csv = '\uFEFF' + lines.join('\r\n');
+      const csv = '\uFEFF' + lines.join('\r\n'); // BOM + CRLF-friendly
 
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
@@ -214,7 +215,8 @@
       setStatus('Exported CSV.');
     });
 
-    document.getElementById('copyBtn').addEventListener('click', async () => {
+    // Copy as TSV (Excel-friendly)
+    copyBtn.addEventListener('click', async () => {
       const rows = [...document.querySelectorAll('#hsTable tbody tr')]
         .map(tr => [...tr.children].map(td => (td.textContent || '')))
         .filter(r => r.some(c => c.trim()));
@@ -232,13 +234,15 @@
       }
     });
 
-    // ---------------- Boot ----------------
+    // ---------- Boot ----------
     initRows();
   </script>
+
   <footer class="max-w-6xl mx-auto px-6 pb-8 mt-6 text-xs text-gray-500">
-  <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-    <span>By <strong>RYKC</strong>. <a href="mailto:ronnieyap1001@me.com" class="text-blue-600 hover:underline">Send feedback</a></span>
-  </div>
-</footer>
+    <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+      <span>Designed &amp; built by <strong>Ronnie Yap</strong>.</span>
+      <a href="mailto:ronnieyap1001@me.com" class="text-blue-600 hover:underline">Send feedback → ronnieyap1001@me.com</a>
+    </div>
+  </footer>
 </body>
 </html>
